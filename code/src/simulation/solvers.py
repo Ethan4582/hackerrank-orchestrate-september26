@@ -67,4 +67,4 @@ def check_installments_feasible(
         extra_outflows=payment_dates_amounts,
         spending_overrides=spending_overrides,
     )
-    return min(trial[:max_day + 1]) >= min_balance
+    return min(trial) >= min_balance

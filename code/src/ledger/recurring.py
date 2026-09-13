@@ -44,6 +44,30 @@ def _convert(amt: float, from_curr: str, to_curr: str, dt: date, rates: list[Exc
     return amt * _get_rate(rates, dt, from_curr, to_curr)
 
 
+def _longest_consistent_chain(events: list[FinancialEvent], tolerance_ratio: float = 0.35) -> list[FinancialEvent]:
+    n = len(events)
+    if n < 2:
+        return events
+    best = [events[0]]
+    for start in range(n):
+        chain = [events[start]]
+        for i in range(start + 1, n):
+            cand = events[i]
+            gap = (cand.settlement_date - chain[-1].settlement_date).days
+            if len(chain) == 1:
+                chain.append(cand)
+                continue
+            gaps = [(chain[j + 1].settlement_date - chain[j].settlement_date).days for j in range(len(chain) - 1)]
+            med = statistics.median(gaps)
+            if med > 0 and abs(gap - med) <= med * tolerance_ratio:
+                chain.append(cand)
+            else:
+                break
+        if len(chain) > len(best):
+            best = chain
+    return best
+
+
 def detect_recurring_streams(
     events: list[FinancialEvent],
     user_id: str,
@@ -63,10 +87,12 @@ def detect_recurring_streams(
     ]
     if salaries:
         salaries.sort(key=lambda x: x.settlement_date)
-        last_sal = salaries[-1]
+        chain_sal = _longest_consistent_chain(salaries)
+        last_sal = chain_sal[-1]
         if "final" not in last_sal.description.lower():
-            amt = _convert(last_sal.amount, last_sal.currency, home_currency, last_sal.settlement_date, rates)
-            doms = [e.settlement_date.day for e in salaries]
+            recent_amts = [_convert(e.amount, e.currency, home_currency, e.settlement_date, rates) for e in chain_sal[-3:]]
+            amt = statistics.median(recent_amts)
+            doms = [e.settlement_date.day for e in chain_sal]
             mode_dom = max(set(doms), key=doms.count)
             ref_date = date(last_sal.settlement_date.year, last_sal.settlement_date.month, mode_dom)
             streams.append(RecurringStream(
@@ -101,20 +127,21 @@ def detect_recurring_streams(
             continue
 
         ev_sorted = sorted(ev_list, key=lambda x: x.settlement_date)
-        dates = [e.settlement_date for e in ev_sorted]
-        gaps = [(dates[i + 1] - dates[i]).days for i in range(len(dates) - 1)]
-        if not gaps:
+        chain = _longest_consistent_chain(ev_sorted)
+        if len(chain) < 2:
             continue
+        gaps = [(chain[i + 1].settlement_date - chain[i].settlement_date).days for i in range(len(chain) - 1)]
         med_gap = round(statistics.median(gaps))
         if med_gap < 5:
             continue
 
-        last_ev = ev_sorted[-1]
+        last_ev = chain[-1]
         if cat in ("groceries", "transport", "dining"):
-            cat_amts = [_convert(float(e.amount), e.currency, home_currency, e.settlement_date, rates) for e in ev_list if e.amount is not None]
+            cat_amts = [_convert(float(e.amount), e.currency, home_currency, e.settlement_date, rates) for e in chain if e.amount is not None]
             amt = statistics.median(cat_amts) if cat_amts else _convert(last_ev.amount, last_ev.currency, home_currency, last_ev.settlement_date, rates)
         else:
-            amt = _convert(last_ev.amount, last_ev.currency, home_currency, last_ev.settlement_date, rates)
+            recent = [_convert(float(e.amount), e.currency, home_currency, e.settlement_date, rates) for e in chain[-3:] if e.amount is not None]
+            amt = statistics.median(recent) if recent else _convert(last_ev.amount, last_ev.currency, home_currency, last_ev.settlement_date, rates)
 
         streams.append(RecurringStream(
             stream_id=f"{user_id}_{cat}_{last_ev.event_id}",
