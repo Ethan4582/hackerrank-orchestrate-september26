@@ -1,0 +1,7 @@
+pandas>=2.0
+python-dotenv
+mistralai
+google-generativeai
+openai
+Pillow
+pytest

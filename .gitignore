@@ -5,3 +5,17 @@ __pycache__/
 .venv/
 code/.cache/
 .agents/
+sample_out.csv
+test_output.csv
+crop_*.png
+scratch_*.py
+code.zip
+*.zip
+.idea/
+.vscode/
+decision.md
+discussion.md
+plan.md
+test.md
+flow.md
+evaluation/
