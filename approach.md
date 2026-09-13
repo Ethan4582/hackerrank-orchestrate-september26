@@ -17,7 +17,7 @@ The Buy or Wait agent evaluates each purchase or payment request in `dataset/req
 ### Goals
 
 - Deliver deterministic recommendations across all 250 evaluation requests.
-- Guarantee that account balance $B(t) \ge B_{\text{min}}$ on every day $t \in [0, 90]$.
+- Guarantee that account balance satisfies `B(t) >= minimum_balance` on every day `t` in `[0, 90]`.
 - Extract unstated amounts from document images and parse employer text updates without manual intervention.
 - Support four distinct payment paths: immediate full payment, provider installments, two-stage partial payments, and delayed payment.
 - Strictly satisfy all 14 HackerRank schema and domain validation invariants (R01 to R14).
@@ -140,13 +140,13 @@ Receipt images (`image_01.png` to `image_16.png`) contain missing transaction am
 Employer messages frequently announce salary updates or contract terminations in English or Indonesian.
 - Captures salary amounts: Handles phrases like `confirmed base salary is EUR 1422.85` and `Gaji bulanan Anda sebesar IDR 38,760,000`.
 - Captures effective dates: Matches dates following `scheduled for`, `effective from`, or `dikonfirmasi untuk`.
-- Captures contract terminations: Matches statements like `seasonal contract has ended` or `telah berakhir` to immediately stop recurring salary projections.
-- Captures bonus disclaimers: Identifies unconfirmed bonuses (`pending approval`, `masih menunggu`) so they are excluded from available cash.
+- Captures contract terminations: Matches statements like `seasonal contract has ended` or `telah berakhir` to stop recurring projections.
+- Captures bonus conditions: Explicitly ignores variable bonuses conditioned on company targets (`bonus ... pending approval`) to maintain conservative income estimates.
 
 ### 2. Ledger and recurring stream detection (`recurring.py`)
 
 Historical events contain fixed commitments, irregular variable purchases, and one-off anomalies.
-
+- **Cadence detection**: Analyzes historical transaction intervals per user and category. Sorts transactions by timestamp, computes delta days, and detects recurring frequencies (weekly, bi-weekly, monthly) based on median intervals.
 - **Salary isolation**: Filters out performance bonuses and sales commissions by checking event descriptions for keywords like `commission` or `bonus`. Bases recurring salary exclusively on confirmed base pay.
 - **Payday alignment**: Calculates the mode day-of-month across historical salary credits. Future recurring paydays snap to this day each calendar month using `add_month(last_date, n)`.
 - **Variable burn smoothing**: For categories with high variance like `groceries`, `transport`, and `dining`, using the last transaction amount distorts weekly spending when the user made an unusual bulk purchase. The engine computes the median historical transaction amount for each category and applies it across median interval gaps.
@@ -154,30 +154,28 @@ Historical events contain fixed commitments, irregular variable purchases, and o
 
 ### 3. Cash flow simulation engine (`engine.py`, `solvers.py`)
 
-The simulation models daily balances over a 90-day horizon ($t = 0, \dots, 90$):
+The simulation models daily balances over a 90-day horizon (`t = 0, ..., 90`):
 
-$$B(0) = B_{\text{base}} - D_{\text{pending}} + F_{\text{scheduled}}(0) + F_{\text{recurring}}(0) - E_{\text{outflow}}(0)$$
-
-For subsequent days $t \in [1, 90]$:
-
-$$B(t) = B(t-1) + F_{\text{scheduled}}(t) + F_{\text{recurring}}(t) - E_{\text{outflow}}(t)$$
+- **Day 0 balance:**
+  `B(0) = B_base - D_pending + F_scheduled(0) + F_recurring(0) - E_outflow(0)`
+- **Subsequent days balance (for t = 1 to 90):**
+  `B(t) = B(t-1) + F_scheduled(t) + F_recurring(t) - E_outflow(t)`
 
 Where:
-- $B_{\text{base}}$ is the starting balance from `financial_profiles.csv`.
-- $D_{\text{pending}}$ is the sum of pending debit holds converted to home currency.
-- $F_{\text{scheduled}}(t)$ is confirmed scheduled inflows and outflows on day $t$.
-- $F_{\text{recurring}}(t)$ is the projected recurring stream balance change on day $t$.
-- $E_{\text{outflow}}(t)$ is the test plan payment on day $t$.
+- `B_base` is the starting balance from `financial_profiles.csv`.
+- `D_pending` is the sum of pending debit holds converted to home currency.
+- `F_scheduled(t)` is confirmed scheduled inflows and outflows on day `t`.
+- `F_recurring(t)` is the projected recurring stream balance change on day `t`.
+- `E_outflow(t)` is the test plan payment on day `t`.
 
 #### Headroom calculation (`solve_amount_safe_to_pay`)
 To determine how much the user can safely pay today without spending adjustments:
 
-$$\text{headroom} = \min_{t \in [0, 90]} B(t) - B_{\text{min}}$$
-
-$$\text{amount\_safe\_to\_pay} = \max(0.0, \min(\text{headroom}, \text{requested\_amount}))$$
+- `headroom = min(B(t) - minimum_balance)` for all `t` in `[0, 90]`.
+- `amount_safe_to_pay = max(0.0, min(headroom, requested_amount))`.
 
 #### Earliest safe date search (`solve_earliest_date`)
-When the user cannot afford the full requested amount today, the solver tests each future date $d \in [0, 90]$. It simulates paying the full amount on day $d$ and checks whether $B(t) \ge B_{\text{min}}$ holds for all $t \in [d, 90]$. The earliest date satisfying this condition is returned.
+When the user cannot afford the full requested amount today, the solver tests each future date `d` in `[0, 90]`. It simulates paying the full amount on day `d` and checks whether `B(t) >= minimum_balance` holds for all `t` in `[d, 90]`. The earliest date satisfying this condition is returned.
 
 ### 4. Candidate generation and ranking (`candidate_gen.py`, `ranker.py`)
 
@@ -186,14 +184,14 @@ The agent enumerates all valid plans allowed by the user profile:
    - `affordable_now`: When `safe_amt >= requested_amount`.
    - `affordable_with_plan`: When spending changes are required to keep the user solvent.
 2. **Installments**: Generated from provider options in `request_payment_options.csv`. Rejects options whose payment count exceeds the user's `max_installment_months`.
-3. **Partial payment**: Permitted only when the user profile allows it, the request specifies `allows_partial_payment = true`, and $0 < \text{safe\_amt} < \text{requested\_amount}$. Generates exactly two payments: `safe_amt` today, and the remainder on `earliest_date_for_full_payment`.
+3. **Partial payment**: Permitted only when the user profile allows it, the request specifies `allows_partial_payment = true`, and `0 < safe_amt < requested_amount`. Generates exactly two payments: `safe_amt` today, and the remainder on `earliest_date_for_full_payment`.
 4. **Wait**: Delays full payment to `earliest_date_for_full_payment`. Eligible only when the user considers full payment and the earliest date is on or before `desired_completion_date`.
 5. **Not recommended**: Safe fallback plan when no candidate meets solvency criteria.
 
 #### Lexicographical ranking order
 When multiple candidate plans pass the 90-day safety check, `ranker.py` picks the winner using this hierarchy:
 1. Completes by `desired_completion_date` (True before False).
-2. Requires no spending changes (0 changes before $> 0$).
+2. Requires no spending changes (0 changes before > 0).
 3. Minimizes total amount paid (including provider financing fees).
 4. Earliest first payment date.
 5. Fewest payment installments.
@@ -219,7 +217,7 @@ When multiple candidate plans pass the 90-day safety check, `ranker.py` picks th
 
 ### Decision 4: Full horizon evaluation over sliding windows
 
-- **Choice**: Test solvency across the entire remaining forecast horizon ($t \in [d, 90]$) when evaluating candidate payment dates.
+- **Choice**: Test solvency across the entire remaining forecast horizon (`t` in `[d, 90]`) when evaluating candidate payment dates.
 - **Rationale**: A 30-day sliding window can approve a payment that leaves the user vulnerable to major recurring obligations due in week 5 or week 6. Evaluating the full 90-day trajectory prevents post-payment insolvency.
 
 ---
